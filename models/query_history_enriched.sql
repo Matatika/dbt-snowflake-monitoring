@@ -1,7 +1,7 @@
 {{ config(
     materialized='incremental',
     unique_key=['query_id', 'start_time'],
-    pre_hook=["{{ create_regexp_replace_udf(this) }}", "{{ create_merge_objects_udf(this) }}"]
+    pre_hook=["{{ create_merge_objects_udf(this) }}"]
 ) }}
 
 with
@@ -10,23 +10,23 @@ query_history as (
         *,
 
         -- this removes comments enclosed by /* <comment text> */ and single line comments starting with -- and either ending with a new line or end of string
-        {{ this.database }}.{{ this.schema }}.dbt_snowflake_monitoring_regexp_replace(query_text, $$(/\*(.|\n|\r)*?\*/)|(--.*$)|(--.*(\n|\r))$$, '') as query_text_no_comments,
+        regexp_replace(query_text, $$(\/\*(.|\n|\r)*?\*\/)|(--.*$)|(--.*(\n|\r))|;$$, '') as query_text_no_comments,
 
-        try_parse_json(regexp_substr(query_text, '/\\*\\s({"app":\\s"dbt".*})\\s\\*/', 1, 1, 'ie')) as _dbt_json_comment_meta,
+        try_parse_json(regexp_substr(query_text, $$\/\*\s*({(.|\n|\r)*"app":\s"dbt"(.|\n|\r)*})\s*\*\/$$, 1, 1, 'ie')) as _dbt_json_comment_meta,
         case
             when try_parse_json(query_tag)['dbt_snowflake_query_tags_version'] is not null then try_parse_json(query_tag)
         end as _dbt_json_query_tag_meta,
         case
             when _dbt_json_comment_meta is not null or _dbt_json_query_tag_meta is not null then
-                {{ this.database }}.{{ this.schema }}.merge_objects(coalesce(_dbt_json_comment_meta, { }), coalesce(_dbt_json_query_tag_meta, { }))
+                {{ adapter.quote_as_configured(this.database, 'database') }}.{{ adapter.quote_as_configured(this.schema, 'schema') }}.merge_objects(coalesce(_dbt_json_comment_meta, { }), coalesce(_dbt_json_query_tag_meta, { }))
         end as dbt_metadata
 
     from {{ ref('stg_query_history') }}
 
     {% if is_incremental() %}
-        -- Conservatively re-process the last 7 days to account for late arriving rates data
+        -- Conservatively re-process the last 3 days to account for late arriving rates data. Allow an override from project variable
         -- which changes the cost per query
-        where end_time > (select dateadd(day, -7, max(end_time)) from {{ this }})
+        where end_time > (select dateadd(day, -{{ var('dbt_snowflake_monitoring_incremental_days', '3') }}, max(end_time)) from {{ this }})
     {% endif %}
 ),
 
@@ -34,17 +34,22 @@ cost_per_query as (
     select *
     from {{ ref('cost_per_query') }}
     {% if is_incremental() %}
-        -- Conservatively re-process the last 7 days to account for late arriving rates data
+        -- Conservatively re-process the last 3 days to account for late arriving rates data. Allow an override from project variable
         -- which changes the cost per query
-        where end_time > (select dateadd(day, -7, max(end_time)) from {{ this }})
+        where end_time > (select dateadd(day, -{{ var('dbt_snowflake_monitoring_incremental_days', '3') }}, max(end_time)) from {{ this }})
     {% endif %}
 )
 
 select
     cost_per_query.query_id,
     cost_per_query.compute_cost,
+    cost_per_query.compute_credits,
+    cost_per_query.query_acceleration_cost,
+    cost_per_query.query_acceleration_credits,
     cost_per_query.cloud_services_cost,
+    cost_per_query.cloud_services_credits,
     cost_per_query.query_cost,
+    cost_per_query.query_credits,
     cost_per_query.execution_start_time,
 
     -- Grab all columns from query_history (except the query time columns which we rename below)
@@ -103,6 +108,10 @@ select
     query_history.query_acceleration_bytes_scanned,
     query_history.query_acceleration_partitions_scanned,
     query_history.query_acceleration_upper_limit_scale_factor,
+    query_history.query_hash,
+    query_history.query_hash_version,
+    query_history.query_parameterized_hash,
+    query_history.query_parameterized_hash_version,
 
     -- Rename some existing columns for clarity
     query_history.total_elapsed_time as total_elapsed_time_ms,
@@ -132,7 +141,12 @@ select
     query_history.transaction_blocked_time / 1000 as transaction_blocked_time_s,
     query_history.list_external_files_time / 1000 as list_external_files_time_s,
     query_history.execution_time / 1000 as execution_time_s,
-    cost_per_query.currency
+    cost_per_query.currency,
+    query_history.query_retry_time as query_retry_time_ms,
+    query_history.query_retry_time / 1000 as query_retry_time_s,
+    query_history.query_retry_cause,
+    query_history.fault_handling_time as fault_handling_time_ms,
+    query_history.fault_handling_time / 1000 as fault_handling_time_s
 
 from query_history
 inner join cost_per_query

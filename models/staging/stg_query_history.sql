@@ -1,4 +1,7 @@
-{{ config(materialized='incremental') }}
+{{ config(
+    materialized='incremental',
+    unique_key=['query_id', 'start_time'],
+) }}
 
 select
     query_id,
@@ -63,12 +66,20 @@ select
     is_client_generated_statement,
     query_acceleration_bytes_scanned,
     query_acceleration_partitions_scanned,
-    query_acceleration_upper_limit_scale_factor
+    query_acceleration_upper_limit_scale_factor,
+    query_hash,
+    query_hash_version,
+    query_parameterized_hash,
+    query_parameterized_hash_version,
+    query_retry_time,
+    query_retry_cause,
+    fault_handling_time
 from {{ source('snowflake_account_usage', 'query_history') }}
 
 {% if is_incremental() %}
     -- must use end time in case query hasn't completed
-    where end_time > (select max(end_time) from {{ this }})
+    -- add lookback window of 2 days to account for late arriving queries
+    where end_time > (select dateadd(day, -{{ var('dbt_snowflake_monitoring_incremental_days', '2') }}, coalesce(max(end_time), '1970-01-01') ) from {{ this }})
 {% endif %}
 
 order by start_time

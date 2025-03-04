@@ -9,22 +9,16 @@ This model guarantees 1 row per day per usage type, by filling in missing values
 known day.
 */
 
-{%- set account_locator -%}
-{%- if var('account_locator', none) -%}
-'{{ var('account_locator') }}'
-{%- else -%}
-current_account()
-{%- endif -%}
-{%- endset -%}
-
 with
 dates_base as (
-    select dateadd(
-            'day',
-            '-' || row_number() over (order by null),
-            dateadd('day', '+1', current_date)
-        ) as date
-    from table(generator(rowcount => (365 * 3)))
+    select date_day as date from (
+        {{ dbt_utils.date_spine(
+                datepart="day",
+                start_date="'2018-01-01'",
+                end_date="dateadd(day, 1, current_date)"
+            )
+        }}
+    )
 ),
 
 rate_sheet_daily_base as (
@@ -36,7 +30,7 @@ rate_sheet_daily_base as (
         service_type
     from {{ ref('stg_rate_sheet_daily') }}
     where
-        account_locator = {{ account_locator }}
+        account_locator = {{ account_locator() }}
 ),
 
 stop_thresholds as (
@@ -70,7 +64,8 @@ latest_remaining_balance_daily as (
         remaining_balance,
         is_account_in_overage
     from remaining_balance_daily
-    qualify row_number() over (order by date desc) = 1
+    qualify row_number() over (
+order by date desc) = 1
 ),
 
 rate_sheet_daily as (
@@ -86,7 +81,7 @@ rates_date_range_w_usage_types as (
         date_range.end_date,
         usage_types.usage_type
     from date_range
-    cross join (select distinct usage_type from rate_sheet_daily) as usage_types
+    cross join (select distinct rate_sheet_daily.usage_type from rate_sheet_daily) as usage_types
 ),
 
 base as (
@@ -104,22 +99,28 @@ rates_w_overage as (
         base.usage_type,
         coalesce(
             rate_sheet_daily.service_type,
-            lag(rate_sheet_daily.service_type) ignore nulls over (partition by base.usage_type order by base.date),
-            lead(rate_sheet_daily.service_type) ignore nulls over (partition by base.usage_type order by base.date)
+            lag(rate_sheet_daily.service_type) ignore nulls over (partition by base.usage_type
+order by base.date),
+            lead(rate_sheet_daily.service_type) ignore nulls over (partition by base.usage_type
+order by base.date)
         ) as service_type,
         coalesce(
             rate_sheet_daily.effective_rate,
-            lag(rate_sheet_daily.effective_rate) ignore nulls over (partition by base.usage_type order by base.date),
-            lead(rate_sheet_daily.effective_rate) ignore nulls over (partition by base.usage_type order by base.date)
+            lag(rate_sheet_daily.effective_rate) ignore nulls over (partition by base.usage_type
+order by base.date),
+            lead(rate_sheet_daily.effective_rate) ignore nulls over (partition by base.usage_type
+order by base.date)
         ) as effective_rate,
         coalesce(
             rate_sheet_daily.currency,
-            lag(rate_sheet_daily.currency) ignore nulls over (partition by base.usage_type order by base.date),
-            lead(rate_sheet_daily.currency) ignore nulls over (partition by base.usage_type order by base.date)
+            lag(rate_sheet_daily.currency) ignore nulls over (partition by base.usage_type
+order by base.date),
+            lead(rate_sheet_daily.currency) ignore nulls over (partition by base.usage_type
+order by base.date)
         ) as currency,
         base.usage_type like 'overage-%' as is_overage_rate,
         replace(base.usage_type, 'overage-', '') as associated_usage_type,
-        coalesce(remaining_balance_daily.is_account_in_overage, latest_remaining_balance_daily.is_account_in_overage) as _is_account_in_overage,
+        coalesce(remaining_balance_daily.is_account_in_overage, latest_remaining_balance_daily.is_account_in_overage, false) as _is_account_in_overage,
         case
             when _is_account_in_overage and is_overage_rate then 1
             when not _is_account_in_overage and not is_overage_rate then 1
@@ -127,7 +128,7 @@ rates_w_overage as (
         end as rate_priority
 
     from base
-    inner join latest_remaining_balance_daily
+    left join latest_remaining_balance_daily on latest_remaining_balance_daily.date is not null
     left join remaining_balance_daily
         on base.date = remaining_balance_daily.date
     left join rate_sheet_daily
@@ -145,7 +146,8 @@ rates as (
         currency,
         is_overage_rate
     from rates_w_overage
-    qualify row_number() over (partition by date, service_type, associated_usage_type order by rate_priority desc) = 1
+    qualify row_number() over (partition by date, service_type, associated_usage_type
+order by rate_priority desc) = 1
 )
 
 select
@@ -155,6 +157,7 @@ select
     effective_rate,
     currency,
     is_overage_rate,
-    row_number() over (partition by service_type, associated_usage_type order by date desc) = 1 as is_latest_rate
+    row_number() over (partition by service_type, associated_usage_type
+order by date desc) = 1 as is_latest_rate
 from rates
 order by date
