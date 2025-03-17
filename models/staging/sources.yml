@@ -23,3 +23,9 @@ sources:
       - name: remaining_balance_daily
       - name: usage_in_currency_daily
 
+  - name: raw_config
+    schema: raw_config
+    tables:
+      - name: rate_sheet_daily
+        config:
+          enabled: "{{ var('raw_config_rate_sheet_daily_enabled', false) }}"
