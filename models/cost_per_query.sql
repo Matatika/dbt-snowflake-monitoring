@@ -101,7 +101,7 @@ query_cost as (
     inner join credits_billed_hourly
         on query_seconds_per_hour.warehouse_id = credits_billed_hourly.warehouse_id
             and query_seconds_per_hour.hour = credits_billed_hourly.hour
-    inner join {{ ref('daily_rates') }} as daily_rates
+    left join {{ ref('daily_rates') }} as daily_rates
         on date(query_seconds_per_hour.start_time) = daily_rates.date
             and daily_rates.service_type = 'WAREHOUSE_METERING'
             and daily_rates.usage_type = 'compute'
